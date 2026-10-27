@@ -146,21 +146,38 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if err != nil {
 		return nil, err
 	}
+	var mlkemCurve, mlkemKeyShare bool
 	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
+		switch ext := extension.(type) {
+		case *utls.SupportedCurvesExtension:
+			mlkemCurve = common.Contains(ext.Curves, utls.X25519MLKEM768)
+		case *utls.KeyShareExtension:
+			mlkemKeyShare = common.Any(ext.KeyShares, func(share utls.KeyShare) bool {
+				return share.Group == utls.X25519MLKEM768
 			})
 		}
 	}
-	err = uConn.BuildHandshakeState()
-	if err != nil {
-		return nil, err
+	// Xray-core since v26.9.8 requires this hybrid share ahead of X25519.
+	// Keep it only when the fingerprint sends both the group and the share.
+	// A group without a share draws a HelloRetryRequest that REALITY cannot relay.
+	// A share without its group is rejected by RFC 8446, Section 4.2.8.
+	if mlkemCurve != mlkemKeyShare {
+		for _, extension := range uConn.Extensions {
+			if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
+				ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
+					return curveID != utls.X25519MLKEM768
+				})
+			}
+			if ks, ok := extension.(*utls.KeyShareExtension); ok {
+				ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
+					return share.Group != utls.X25519MLKEM768
+				})
+			}
+		}
+		err = uConn.BuildHandshakeState()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(uConfig.NextProtos) > 0 {
